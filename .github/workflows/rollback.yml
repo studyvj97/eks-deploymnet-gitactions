@@ -1,84 +1,71 @@
-name: Rollback Helm Release
+name: Helm Rollback
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Image tag to rollback to (e.g. v1.3)"
+      revision:
+        description: "Helm revision number to roll back to"
         required: true
-        default: "v1.1"
 
 permissions:
   id-token: write
   contents: read
 
 env:
-  AWS_REGION: us-east-1
-  EKS_CLUSTER: eks-test-cluster
-  ECR_REGISTRY: 200901485389.dkr.ecr.us-east-1.amazonaws.com
-  ECR_REPO: vijay_test
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  EKS_CLUSTER: ${{ vars.EKS_CLUSTER }}
   HELM_RELEASE: nginx-demo
-  CHART_PATH: charts/nginx-demo
 
 jobs:
   rollback:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::200901485389:role/git-action
-          aws-region: ${{ env.AWS_REGION }}
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/git-action
+        aws-region: ${{ env.AWS_REGION }}
 
-      - name: Create kubeconfig
-        run: |
-          CLUSTER_JSON=$(aws eks describe-cluster --name $EKS_CLUSTER --query "cluster" --output json)
-          ENDPOINT=$(echo "$CLUSTER_JSON" | jq -r .endpoint)
-          CACERT=$(echo "$CLUSTER_JSON" | jq -r .certificateAuthority.data)
-          mkdir -p ~/.kube
-          cat > ~/.kube/config <<EOF
-apiVersion: v1
-clusters:
-- cluster:
-    server: ${ENDPOINT}
-    certificate-authority-data: ${CACERT}
-  name: eks
-contexts:
-- context:
-    cluster: eks
-    user: aws
-  name: eks
-current-context: eks
-kind: Config
-preferences: {}
-users:
-- name: aws
-  user:
-    exec:
-      apiVersion: client.authentication.k8s.io/v1beta1
-      command: aws
-      args:
-      - eks
-      - get-token
-      - --cluster-name
-      - $EKS_CLUSTER
-      - --region
-      - $AWS_REGION
-EOF
+    - name: Build kubeconfig (NO EOF)
+      run: |
+        ENDPOINT=$(aws eks describe-cluster --name $EKS_CLUSTER --region $AWS_REGION --query "cluster.endpoint" --output text)
+        CERT=$(aws eks describe-cluster --name $EKS_CLUSTER --region $AWS_REGION --query "cluster.certificateAuthority.data" --output text)
 
-      - name: Helm rollback to requested tag
-        run: |
-          TAG=${{ github.event.inputs.version }}
-          helm upgrade --install $HELM_RELEASE $CHART_PATH \
-            --set image.repository=${ECR_REGISTRY}/${ECR_REPO} \
-            --set image.tag=${TAG} \
-            --wait --timeout 5m
+        mkdir -p ~/.kube
+        export KUBECONFIG=$(pwd)/kubeconfig
 
-      - name: Slack notification (rollback)
-        if: always() && secrets.SLACK_WEBHOOK
-        run: |
-          payload='{"text":"⚠️ Rollback executed: '${HELM_RELEASE}' → '${ECR_REGISTRY}/${ECR_REPO}:${{ github.event.inputs.version }}' (by '${{ github.actor }}')"}'
-          curl -s -X POST -H "Content-type: application/json" --data "$payload" "${{ secrets.SLACK_WEBHOOK }}"
+        kubectl config set-cluster eks \
+          --server="$ENDPOINT" \
+          --certificate-authority=<(echo "$CERT" | base64 -d)
 
+        kubectl config set-context eks \
+          --cluster=eks \
+          --user=aws
+
+        kubectl config set-credentials aws \
+          --exec-command=aws \
+          --exec-api-version=client.authentication.k8s.io/v1beta1 \
+          --exec-arg=eks \
+          --exec-arg=get-token \
+          --exec-arg=--cluster-name \
+          --exec-arg=$EKS_CLUSTER \
+          --exec-arg=--region \
+          --exec-arg=$AWS_REGION
+
+        kubectl config use-context eks
+        echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
+
+    - name: Perform Helm Rollback
+      run: |
+        helm rollback $HELM_RELEASE ${{ github.event.inputs.revision }} --wait
+
+    - name: Slack Rollback Notification
+      if: secrets.SLACK_WEBHOOK
+      run: |
+        payload='{"text":"⚠️ Rollback executed\n• Release: '${HELM_RELEASE}'\n• Revision: '${{ github.event.inputs.revision }}'"}'
+        curl -X POST -H "Content-type: application/json" --data "$payload" "${{ secrets.SLACK_WEBHOOK }}"
