@@ -17,6 +17,7 @@ env:
   ECR_REGISTRY: "${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com"
   HELM_RELEASE: nginx-demo
   CHART_PATH: charts/nginx-demo
+  SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
 
 jobs:
   deploy:
@@ -42,14 +43,11 @@ jobs:
       run: |
         docker build -t $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG ./app
 
-    - name: Push Docker image to ECR
+    - name: Push Docker image
       run: |
         docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
 
-    # ----------------------------
-    # NO EOF — Safe kubeconfig creation
-    # ----------------------------
-    - name: Generate kubeconfig (safe, no EOF)
+    - name: Generate kubeconfig
       run: |
         ENDPOINT=$(aws eks describe-cluster --name $EKS_CLUSTER --region $AWS_REGION --query "cluster.endpoint" --output text)
         CERT=$(aws eks describe-cluster --name $EKS_CLUSTER --region $AWS_REGION --query "cluster.certificateAuthority.data" --output text)
@@ -78,7 +76,7 @@ jobs:
         kubectl config use-context eks
         echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
 
-    - name: Verify cluster access
+    - name: Verify kubectl
       run: kubectl get nodes
 
     - name: Helm Upgrade/Install
@@ -89,13 +87,11 @@ jobs:
           --wait --timeout 5m
 
     - name: Slack Success Notification
-      if: success() && secrets.SLACK_WEBHOOK
+      if: success() && env.SLACK_WEBHOOK != ''
       run: |
-        payload='{"text":"✅ Deployment Succeeded\n• Release: '${HELM_RELEASE}'\n• Image: '${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}'"}'
-        curl -X POST -H "Content-type: application/json" --data "$payload" "${{ secrets.SLACK_WEBHOOK }}"
+        payload='{"text":"✅ Deployment Successful\nRelease: '${HELM_RELEASE}'\nImage: '${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}'"}'
+        curl -X POST -H "Content-type: application/json" --data "$payload" "$SLACK_WEBHOOK"
 
     - name: Slack Failure Notification
-      if: failure() && secrets.SLACK_WEBHOOK
+      if: failure() && env.SLACK_WEBHOOK != ''
       run: |
-        payload='{"text":"❌ Deployment FAILED\n• Image: '${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}'"}'
-        curl -X POST -H "Content-type: application/json" --data "$payload" "${{ secrets.SLACK_WEBHOOK }}"
