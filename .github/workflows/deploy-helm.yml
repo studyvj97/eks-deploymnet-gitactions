@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
     - name: Checkout code
       uses: actions/checkout@v4
 
@@ -44,10 +45,9 @@ jobs:
         docker build -t $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG ./app
 
     - name: Push Docker image
-      run: |
-        docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
+      run: docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
 
-    - name: Generate kubeconfig
+    - name: Generate kubeconfig safely
       run: |
         ENDPOINT=$(aws eks describe-cluster --name $EKS_CLUSTER --region $AWS_REGION --query "cluster.endpoint" --output text)
         CERT=$(aws eks describe-cluster --name $EKS_CLUSTER --region $AWS_REGION --query "cluster.certificateAuthority.data" --output text)
@@ -55,9 +55,12 @@ jobs:
         mkdir -p ~/.kube
         export KUBECONFIG=$(pwd)/kubeconfig
 
+        echo "$CERT" | base64 -d > ca.crt
+
         kubectl config set-cluster eks \
           --server="$ENDPOINT" \
-          --certificate-authority=<(echo "$CERT" | base64 -d)
+          --certificate-authority=ca.crt \
+          --embed-certs=true
 
         kubectl config set-context eks \
           --cluster=eks \
@@ -76,7 +79,7 @@ jobs:
         kubectl config use-context eks
         echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
 
-    - name: Verify kubectl
+    - name: Verify cluster connection
       run: kubectl get nodes
 
     - name: Helm Upgrade/Install
@@ -86,12 +89,18 @@ jobs:
           --set image.tag=$IMAGE_TAG \
           --wait --timeout 5m
 
-    - name: Slack Success Notification
-      if: success() && env.SLACK_WEBHOOK != ''
-      run: |
-        payload='{"text":"✅ Deployment Successful\nRelease: '${HELM_RELEASE}'\nImage: '${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}'"}'
-        curl -X POST -H "Content-type: application/json" --data "$payload" "$SLACK_WEBHOOK"
+    # ------------------------------
+    # ALWAYS SEND SLACK NOTIFICATION
+    # ------------------------------
 
-    - name: Slack Failure Notification
-      if: failure() && env.SLACK_WEBHOOK != ''
+    - name: Slack Notification (Always)
+      if: always() && env.SLACK_WEBHOOK != ''
       run: |
+        if [ "${{ job.status }}" = "success" ]; then
+          STATUS_MSG="✅ Deployment SUCCESS"
+        else
+          STATUS_MSG="❌ Deployment FAILED"
+        fi
+
+        payload="{\"text\":\"$STATUS_MSG\n• Release: $HELM_RELEASE\n• Image: $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG\n• Status: ${{ job.status }}\"}"
+        curl -X POST -H "Content-type: application/json" --data "$payload" "$SLACK_WEBHOOK"
