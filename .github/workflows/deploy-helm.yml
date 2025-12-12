@@ -53,12 +53,12 @@ jobs:
 
           mkdir -p ~/.kube
 
-          cat <<EOF > ~/.kube/config
+          cat << 'EOT' > ~/.kube/config
 apiVersion: v1
 clusters:
 - cluster:
-    server: ${ENDPOINT}
-    certificate-authority-data: ${CACERT}
+    server: PLACEHOLDER_ENDPOINT
+    certificate-authority-data: PLACEHOLDER_CACERT
   name: eks
 contexts:
 - context:
@@ -75,13 +75,17 @@ users:
       apiVersion: client.authentication.k8s.io/v1beta1
       command: aws
       args:
-      - eks
-      - get-token
-      - --cluster-name
-      - ${EKS_CLUSTER}
-      - --region
-      - ${AWS_REGION}
-EOF
+        - eks
+        - get-token
+        - --cluster-name
+        - eks-test-cluster
+        - --region
+        - us-east-1
+EOT
+
+          # Replace placeholders after heredoc
+          sed -i "s|PLACEHOLDER_ENDPOINT|${ENDPOINT}|g" ~/.kube/config
+          sed -i "s|PLACEHOLDER_CACERT|${CACERT}|g" ~/.kube/config
 
       - name: Verify kubectl access
         run: kubectl get ns
