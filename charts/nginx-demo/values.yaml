@@ -1,0 +1,11 @@
+replicaCount: 1
+
+image:
+  repository: 200901485389.dkr.ecr.us-east-1.amazonaws.com/vijay_test
+  tag: "v1.placeholder"
+
+service:
+  type: LoadBalancer
+  port: 80
+
+resources: {}

@@ -1,0 +1,106 @@
+name: Build & Deploy via Helm
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 200901485389.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPO: vijay_test
+  EKS_CLUSTER: eks-test-cluster
+  HELM_RELEASE: nginx-demo
+  CHART_PATH: charts/nginx-demo
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set IMAGE_TAG
+      run: echo "IMAGE_TAG=v1.${GITHUB_RUN_NUMBER}" >> $GITHUB_ENV
+
+    - name: Configure AWS Credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::200901485389:role/git-action
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to ECR
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build Docker image
+      run: docker build -t $ECR_REPO:${IMAGE_TAG} ./app
+
+    - name: Tag & Push to ECR
+      run: |
+        docker tag $ECR_REPO:${IMAGE_TAG} $ECR_REGISTRY/$ECR_REPO:${IMAGE_TAG}
+        docker push $ECR_REGISTRY/$ECR_REPO:${IMAGE_TAG}
+
+    - name: Get EKS endpoint/CA and create kubeconfig (ephemeral)
+      id: eks_info
+      run: |
+        CLUSTER_JSON=$(aws eks describe-cluster --name $EKS_CLUSTER --query "cluster" --output json)
+        echo "$CLUSTER_JSON" > cluster.json
+        ENDPOINT=$(jq -r .endpoint cluster.json)
+        CACERT=$(jq -r .certificateAuthority.data cluster.json)
+        mkdir -p ~/.kube
+        cat > ~/.kube/config <<EOF
+apiVersion: v1
+clusters:
+- cluster:
+    server: ${ENDPOINT}
+    certificate-authority-data: ${CACERT}
+  name: eks
+contexts:
+- context:
+    cluster: eks
+    user: aws
+  name: eks
+current-context: eks
+kind: Config
+preferences: {}
+users:
+- name: aws
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: aws
+      args:
+      - eks
+      - get-token
+      - --cluster-name
+      - $EKS_CLUSTER
+      - --region
+      - $AWS_REGION
+EOF
+
+    - name: Verify kubectl (list ns)
+      run: kubectl get ns
+
+    - name: Helm Upgrade/Install
+      run: |
+        helm upgrade --install $HELM_RELEASE $CHART_PATH \
+          --set image.repository=${ECR_REGISTRY}/${ECR_REPO} \
+          --set image.tag=${IMAGE_TAG} \
+          --wait --timeout 5m
+
+    - name: Slack Success Notification
+      if: success() && secrets.SLACK_WEBHOOK
+      run: |
+        payload='{"text":"✅ Deployment succeeded\n• release: '${HELM_RELEASE}'\n• image: '${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}'\n• cluster: '${EKS_CLUSTER}'\n• run: '${GITHUB_RUN_NUMBER}'"}'
+        curl -s -X POST -H "Content-type: application/json" --data "$payload" "${{ secrets.SLACK_WEBHOOK }}"
+
+    - name: Slack Failure Notification
+      if: failure() && secrets.SLACK_WEBHOOK
+      run: |
+        payload='{"text":"❌ Deployment FAILED\n• release: '${HELM_RELEASE}'\n• attempted image: '${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}'\n• cluster: '${EKS_CLUSTER}'\n• run: '${GITHUB_RUN_NUMBER}'\n• Check Actions logs: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'"}'
+        curl -s -X POST -H "Content-type: application/json" --data "$payload" "${{ secrets.SLACK_WEBHOOK }}"
+
