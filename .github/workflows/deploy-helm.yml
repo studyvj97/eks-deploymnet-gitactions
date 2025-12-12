@@ -83,7 +83,6 @@ users:
       - ${AWS_REGION}
 EOF
 
-
       - name: Verify kubectl access
         run: kubectl get ns
 
