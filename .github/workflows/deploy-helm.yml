@@ -50,8 +50,10 @@ jobs:
           CLUSTER_JSON=$(aws eks describe-cluster --name $EKS_CLUSTER --query "cluster" --output json)
           ENDPOINT=$(echo "$CLUSTER_JSON" | jq -r .endpoint)
           CACERT=$(echo "$CLUSTER_JSON" | jq -r .certificateAuthority.data)
+
           mkdir -p ~/.kube
-          cat > ~/.kube/config <<EOF
+
+          cat <<EOF > ~/.kube/config
 apiVersion: v1
 clusters:
 - cluster:
@@ -65,6 +67,7 @@ contexts:
   name: eks
 current-context: eks
 kind: Config
+preferences: {}
 users:
 - name: aws
   user:
@@ -75,10 +78,11 @@ users:
       - eks
       - get-token
       - --cluster-name
-      - $EKS_CLUSTER
+      - ${EKS_CLUSTER}
       - --region
-      - $AWS_REGION
+      - ${AWS_REGION}
 EOF
+
 
       - name: Verify kubectl access
         run: kubectl get ns
