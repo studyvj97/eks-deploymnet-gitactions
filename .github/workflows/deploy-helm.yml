@@ -1,4 +1,4 @@
-name: Build & Deploy via Helm
+name: Build, Deploy & Auto-Rollback via Helm
 
 on:
   push:
@@ -37,12 +37,11 @@ jobs:
         role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/git-action
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Login to Amazon ECR
+    - name: Login to ECR
       uses: aws-actions/amazon-ecr-login@v2
 
     - name: Build Docker image
-      run: |
-        docker build -t $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG ./app
+      run: docker build -t $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG ./app
 
     - name: Push Docker image
       run: docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
@@ -79,28 +78,64 @@ jobs:
         kubectl config use-context eks
         echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
 
-    - name: Verify cluster connection
+    - name: Verify cluster access
       run: kubectl get nodes
 
-    - name: Helm Upgrade/Install
+    - name: Helm Deploy
       run: |
         helm upgrade --install $HELM_RELEASE $CHART_PATH \
           --set image.repository=$ECR_REGISTRY/$ECR_REPO \
           --set image.tag=$IMAGE_TAG \
           --wait --timeout 5m
 
-    # ------------------------------
-    # ALWAYS SEND SLACK NOTIFICATION
-    # ------------------------------
+    - name: Store current Helm revision
+      id: rev
+      run: |
+        REV=$(helm history $HELM_RELEASE -o json | jq '.[-1].revision')
+        echo "REVISION=$REV" >> $GITHUB_ENV
 
+    # ----------------------------------------------------------
+    # HEALTH CHECK + AUTO ROLLBACK LOGIC
+    # ----------------------------------------------------------
+    - name: Check Deployment Health
+      id: health
+      run: |
+        echo "Waiting for pods to become Ready..."
+        sleep 10
+
+        NOT_READY=$(kubectl get pods -l app=$HELM_RELEASE --no-headers | awk '$2 !~ /1\/1/ {print $0}' | wc -l)
+
+        if [ "$NOT_READY" -gt 0 ]; then
+          echo "Deployment failed. Pods not ready."
+          echo "FAILED=true" >> $GITHUB_ENV
+          exit 1
+        else
+          echo "Deployment healthy"
+          echo "FAILED=false" >> $GITHUB_ENV
+        fi
+
+    - name: Auto Rollback if Failed
+      if: failure()
+      run: |
+        echo "Performing Helm rollback..."
+        PREV=$((REVISION - 1))
+        helm rollback $HELM_RELEASE $PREV --wait --timeout 5m
+        echo "Rolled back to revision $PREV"
+
+    # ----------------------------------------------------------
+    # SLACK ALWAYS NOTIFICATION
+    # ----------------------------------------------------------
     - name: Slack Notification (Always)
       if: always() && env.SLACK_WEBHOOK != ''
       run: |
-        if [ "${{ job.status }}" = "success" ]; then
-          STATUS_MSG="✅ Deployment SUCCESS"
+        if [ "${FAILED}" = "true" ]; then
+          MSG="❌ Deployment FAILED → Auto Rollback Triggered"
         else
-          STATUS_MSG="❌ Deployment FAILED"
+          MSG="✅ Deployment SUCCESS"
         fi
 
-        payload="{\"text\":\"$STATUS_MSG\n• Release: $HELM_RELEASE\n• Image: $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG\n• Status: ${{ job.status }}\"}"
-        curl -X POST -H "Content-type: application/json" --data "$payload" "$SLACK_WEBHOOK"
+        payload="{\"text\":\"$MSG\n• Release: $HELM_RELEASE\n• Revision: $REVISION\n• Image: $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG\n• Status: ${{ job.status }}\"}"
+
+        curl -X POST -H "Content-type: application/json" \
+          --data "$payload" \
+          "$SLACK_WEBHOOK"
